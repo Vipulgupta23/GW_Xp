@@ -8,17 +8,16 @@ interface Claim {
   trigger_type: string;
   status: string;
   payout_amount: number;
-  income_gap: number;
+  income_gap?: number;
   fraud_score: number;
   created_at: string;
-  hinglish_explanation: string;
-  earning_simulation: Record<string, unknown>;
+  hinglish_explanation?: string;
+  earning_simulation?: Record<string, unknown>;
   workers?: { name: string; platform: string; grid_id: string };
 }
 
 export default function AdminClaimsPage() {
   const [claims, setClaims] = useState<Claim[]>([]);
-  const [loading, setLoading] = useState(true);
   const [simulating, setSimulating] = useState(false);
   const [simForm, setSimForm] = useState({
     trigger_type: "heavy_rainfall",
@@ -35,7 +34,6 @@ export default function AdminClaimsPage() {
     } catch (err) {
       console.error(err);
     }
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -168,7 +166,7 @@ export default function AdminClaimsPage() {
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Income Gap</span>
-                <span className="text-red-400">₹{selectedClaim.income_gap.toFixed(0)}</span>
+                <span className="text-red-400">₹{(selectedClaim.income_gap ?? 0).toFixed(0)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-400">Payout</span>
@@ -185,7 +183,9 @@ export default function AdminClaimsPage() {
 
               <div>
                 <p className="text-slate-400 mb-1">Hinglish Explanation</p>
-                <p className="text-emerald-300 bg-emerald-500/10 p-3 rounded-xl text-sm">{selectedClaim.hinglish_explanation}</p>
+                <p className="text-emerald-300 bg-emerald-500/10 p-3 rounded-xl text-sm">
+                  {selectedClaim.hinglish_explanation || "Explanation will appear after claim processing."}
+                </p>
               </div>
             </div>
           </div>

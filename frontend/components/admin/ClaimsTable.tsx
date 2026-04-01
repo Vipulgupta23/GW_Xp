@@ -101,7 +101,7 @@ export default function ClaimsTable({ claims, onSelectClaim, onApprove, onReject
             {claims.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-4 py-12 text-center text-slate-400">
-                  No claims yet. Use "Simulate Disruption" above to create some!
+                  No claims yet. Use &quot;Simulate Disruption&quot; above to create some!
                 </td>
               </tr>
             )}
