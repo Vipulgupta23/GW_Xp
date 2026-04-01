@@ -1,0 +1,15 @@
+{
+  "name": "Incometrix AI",
+  "short_name": "Incometrix",
+  "description": "AI-Powered Income Protection for Delivery Workers",
+  "theme_color": "#F59E0B",
+  "background_color": "#0F172A",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "icons": [
+    { "src": "/icon-192.svg", "sizes": "192x192", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/icon-512.svg", "sizes": "512x512", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
