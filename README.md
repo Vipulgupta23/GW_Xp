@@ -809,6 +809,6 @@ This project is part of the Guidewire DEVTrails 2026 challenge.
 
 **Built with ❤️ for India's Gig Warriors**
 
-*Because the people who deliver in the storm deserve protection from the storm.*
+*Because the people who deliver in the storm deserve protection from the storm..*
 
 </div>
