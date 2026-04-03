@@ -16,7 +16,7 @@ export default function OnboardPage() {
   const [name, setName] = useState("");
   const [platform, setPlatform] = useState("");
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [gridInfo, setGridInfo] = useState<{ label: string; grid: Record<string, unknown> | null } | null>(null);
+  const [gridInfo, setGridInfo] = useState<{ label: string; grid: Record<string, unknown> | null; city?: string; is_supported_city?: boolean } | null>(null);
   const [platformId, setPlatformId] = useState("");
   const [linkResult, setLinkResult] = useState<{ message: string } | null>(null);
   const [loading, setLoading] = useState(false);
@@ -28,7 +28,7 @@ export default function OnboardPage() {
   const resolveLocation = async (coords: { lat: number; lng: number }) => {
     setLocation(coords);
     try {
-      const grid = await api<{ label: string; grid: Record<string, unknown> | null }>(
+      const grid = await api<{ label: string; grid: Record<string, unknown> | null; city?: string; is_supported_city?: boolean }>(
         `/microgrids/lookup?lat=${coords.lat}&lng=${coords.lng}`
       );
       setGridInfo(grid);
@@ -289,6 +289,9 @@ export default function OnboardPage() {
                 <div className="bg-slate-800/80 rounded-xl p-4 border border-emerald-500/30 glow-green">
                   <p className="text-emerald-400 font-semibold text-sm">📍 Location Detected</p>
                   <p className="text-white font-medium mt-1">{gridInfo.label}</p>
+                  {gridInfo.city && (
+                    <p className="text-slate-400 text-xs mt-2">Detected city: {gridInfo.city}</p>
+                  )}
                   <p className="text-slate-400 text-xs mt-2">
                     Lat: {location?.lat.toFixed(4)}, Lng: {location?.lng.toFixed(4)}
                   </p>

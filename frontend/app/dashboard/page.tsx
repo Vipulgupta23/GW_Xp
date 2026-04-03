@@ -11,6 +11,7 @@ export default function DashboardPage() {
   const [worker, setWorker] = useState<Record<string, unknown> | null>(null);
   const [policy, setPolicy] = useState<Record<string, unknown> | null>(null);
   const [claims, setClaims] = useState<Array<Record<string, unknown>>>([]);
+  const [protectionStatus, setProtectionStatus] = useState<Record<string, unknown> | null>(null);
   const [showWhatsApp, setShowWhatsApp] = useState(false);
   const [latestPayout, setLatestPayout] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
@@ -21,17 +22,24 @@ export default function DashboardPage() {
 
     const fetchData = async () => {
       try {
-        const [w, p, c] = await Promise.all([
+        const [w, p, c, status] = await Promise.all([
           api<Record<string, unknown>>(`/workers/${workerId}`),
           api<{ policy: Record<string, unknown> | null }>(`/policies/active/${workerId}`),
-          api<Array<Record<string, unknown>>>(`/claims/worker/${workerId}?limit=5`),
+          api<{ claims: Array<Record<string, unknown>> }>(`/claims/worker/${workerId}?limit=5`),
+          api<Record<string, unknown>>(`/workers/${workerId}/protection-status`),
         ]);
         setWorker(w);
         setPolicy(p.policy);
-        setClaims(c);
+        setClaims(c.claims || []);
+        setProtectionStatus(status);
 
         // Auto-show WhatsApp modal for latest paid claim
-        const paidClaim = c.find((cl: Record<string, unknown>) => cl.status === "paid" || cl.status === "approved");
+        const paidClaim = (c.claims || []).find(
+          (cl: Record<string, unknown>) =>
+            cl.status === "paid" ||
+            cl.status === "auto_approved" ||
+            cl.status === "approved_after_review"
+        );
         if (paidClaim) {
           setLatestPayout(paidClaim);
           const shown = sessionStorage.getItem(`whatsapp_shown_${paidClaim.id}`);
@@ -76,10 +84,12 @@ export default function DashboardPage() {
 
       {/* Disruption Banner */}
       <DisruptionBanner
-        riskPercent={65}
-        description="Heavy rain expected 4PM–10PM"
-        earningDrop="₹350–₹500"
-        isActive={true}
+        riskPercent={(protectionStatus?.banner as Record<string, unknown> | undefined)?.risk_percent as number || 0}
+        title={(protectionStatus?.banner as Record<string, unknown> | undefined)?.title as string || "Protection Status"}
+        description={(protectionStatus?.banner as Record<string, unknown> | undefined)?.description as string || "No active disruption in your zone"}
+        earningDrop={(protectionStatus?.banner as Record<string, unknown> | undefined)?.earning_drop as string || "₹0–₹0"}
+        isActive={Boolean((protectionStatus?.banner as Record<string, unknown> | undefined)?.is_active)}
+        coverageActive={Boolean((protectionStatus?.banner as Record<string, unknown> | undefined)?.coverage_active)}
       />
 
       {/* ISS Gauge */}

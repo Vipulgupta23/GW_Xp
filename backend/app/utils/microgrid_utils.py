@@ -1,5 +1,5 @@
 """
-Microgrid Utilities — PostGIS zone lookup helpers
+Microgrid Utilities — PostGIS zone lookup helpers.
 """
 
 import math
@@ -7,19 +7,37 @@ import math
 from app.database import get_supabase
 
 
+def _fetch_supported_cities() -> list[dict]:
+    db = get_supabase()
+    result = (
+        db.table("supported_cities")
+        .select("*")
+        .eq("pricing_enabled", True)
+        .execute()
+    )
+    return result.data or []
+
+
+def list_supported_cities() -> list[dict]:
+    return _fetch_supported_cities()
+
+
+def get_city_by_name(city_name: str) -> dict | None:
+    for city in _fetch_supported_cities():
+        if city["name"] == city_name:
+            return city
+    return None
+
+
 def infer_city_from_coords(lat: float, lng: float) -> str:
-    """Infer major Indian city name from coordinates (coarse bounding boxes)."""
-    if 12.7 <= lat <= 13.3 and 80.0 <= lng <= 80.4:
-        return "Chennai"
-    if 12.8 <= lat <= 13.2 and 77.4 <= lng <= 77.8:
-        return "Bengaluru"
-    if 17.2 <= lat <= 17.7 and 78.2 <= lng <= 78.7:
-        return "Hyderabad"
-    if 18.8 <= lat <= 19.4 and 72.7 <= lng <= 73.1:
-        return "Mumbai"
-    if 28.4 <= lat <= 28.9 and 76.9 <= lng <= 77.5:
-        return "Delhi NCR"
-    return "Your City"
+    """Infer supported city from DB-backed city bounds."""
+    for city in _fetch_supported_cities():
+        if (
+            city["lat_min"] <= lat <= city["lat_max"]
+            and city["lng_min"] <= lng <= city["lng_max"]
+        ):
+            return city["name"]
+    return "Coverage Pending"
 
 
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -36,25 +54,45 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def is_supported_city(city: str) -> bool:
+    return any(item["name"] == city for item in _fetch_supported_cities())
+
+
+def get_supported_city_by_coords(lat: float, lng: float) -> dict | None:
+    for city in _fetch_supported_cities():
+        if (
+            city["lat_min"] <= lat <= city["lat_max"]
+            and city["lng_min"] <= lng <= city["lng_max"]
+        ):
+            return city
+    return None
+
+
 def find_grid_by_coordinates(lat: float, lng: float) -> dict | None:
     """Find which microgrid contains the given coordinates using PostGIS."""
     db = get_supabase()
+    city_meta = get_supported_city_by_coords(lat, lng)
+    if not city_meta:
+        return None
 
-    # Use PostGIS ST_Contains to find the grid
-    result = db.rpc(
-        "find_grid_by_point",
-        {"p_lat": lat, "p_lng": lng},
-    ).execute()
+    try:
+        result = db.rpc(
+            "find_grid_by_point",
+            {"p_lat": lat, "p_lng": lng},
+        ).execute()
+        if result.data and len(result.data) > 0:
+            grid = result.data[0]
+            if grid.get("city") == city_meta["name"]:
+                return grid
+    except Exception:
+        pass
 
-    if result.data and len(result.data) > 0:
-        return result.data[0]
-
-    # Fallback: find nearest grid by center distance
+    # Fallback: find nearest grid within the inferred city only.
     result = (
         db.table("microgrids")
         .select("*")
-        .order("center_lat")
-        .limit(225)
+        .eq("city", city_meta["name"])
+        .limit(400)
         .execute()
     )
     if not result.data:
@@ -69,8 +107,17 @@ def find_grid_by_coordinates(lat: float, lng: float) -> dict | None:
             best_dist = dist
             best = grid
 
-    # Prevent mapping distant cities (for example Chennai) into Bengaluru grids.
-    if best is None or best_dist > 35:
+    lookup_radius = max(
+        _haversine_km(
+            city_meta["lat_min"],
+            city_meta["lng_min"],
+            city_meta["lat_max"],
+            city_meta["lng_max"],
+        )
+        / 2,
+        10,
+    )
+    if best is None or best_dist > lookup_radius:
         return None
     return best
 

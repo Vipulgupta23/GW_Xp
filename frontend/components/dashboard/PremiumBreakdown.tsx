@@ -9,6 +9,9 @@ interface PremiumBreakdownProps {
   seasonLabel?: string;
   issLabel?: string;
   personaLabel?: string;
+  pricingStory?: string;
+  coverageHoursLabel?: string;
+  coverageHours?: number;
   compact?: boolean;
 }
 
@@ -23,6 +26,9 @@ export default function PremiumBreakdown({
   seasonLabel,
   issLabel,
   personaLabel,
+  pricingStory,
+  coverageHoursLabel,
+  coverageHours,
   compact = false,
 }: PremiumBreakdownProps) {
   return (
@@ -52,6 +58,21 @@ export default function PremiumBreakdown({
         <span className="text-white">This Week</span>
         <span className="text-amber-400 font-mono">Rs {finalPremium.toFixed(2)}</span>
       </div>
+      {(coverageHoursLabel || pricingStory) && <hr className="border-slate-700" />}
+      {coverageHoursLabel && (
+        <div className="flex justify-between gap-4">
+          <span className="text-slate-400">Dynamic Cover</span>
+          <span className="text-cyan-300 text-right">
+            {coverageHours ? `${coverageHours}h · ` : ""}
+            {coverageHoursLabel}
+          </span>
+        </div>
+      )}
+      {pricingStory && (
+        <p className="text-[11px] leading-relaxed text-slate-300">
+          {pricingStory}
+        </p>
+      )}
     </div>
   );
 }

@@ -9,9 +9,7 @@ from datetime import datetime, timedelta, timezone
 import uuid
 
 from app.database import get_supabase
-from app.ml.premium_engine import calculate_premium
-from app.utils.microgrid_utils import get_grid_by_id
-from app.services import weather_service
+from app.services.pricing_quote_service import build_pricing_quote
 
 router = APIRouter(prefix="/policies", tags=["policies"])
 
@@ -41,25 +39,13 @@ async def get_plans_for_worker(worker_id: str):
     plans_res = db.table("plans").select("*").execute()
     plans = plans_res.data or []
 
-    grid = get_grid_by_id(worker.get("grid_id", "BLR_05_05"))
-    if not grid:
-        grid = {
-            "flood_risk": 0.3,
-            "heat_index": 0.4,
-            "aqi_avg": 120,
-            "traffic_risk": 0.4,
-            "composite_risk": 0.35,
-            "city": worker.get("city", "Your City"),
-        }
-
-    # Get rainfall forecast for premium calculation
-    rainfall_avg = await weather_service.get_rainfall_7d_avg(
-        grid.get("center_lat", 12.93), grid.get("center_lng", 77.62)
-    )
-
     result = []
     for plan in plans:
-        premium = calculate_premium(worker, plan, grid, rainfall_avg)
+        try:
+            quote = await build_pricing_quote(worker, plan)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        premium = quote["breakdown"]
         result.append(
             {
                 **plan,
@@ -68,7 +54,11 @@ async def get_plans_for_worker(worker_id: str):
             }
         )
 
-    return {"plans": result, "worker": worker, "grid_label": grid.get("city", "Bengaluru")}
+    return {
+        "plans": result,
+        "worker": worker,
+        "grid_label": worker.get("city", "Coverage Pending"),
+    }
 
 
 @router.post("/subscribe")
@@ -98,21 +88,13 @@ async def subscribe_to_plan(req: SubscribeRequest):
         raise HTTPException(status_code=404, detail="Plan not found")
     plan = plan_res.data
 
-    grid = get_grid_by_id(worker.get("grid_id", "BLR_05_05"))
-    if not grid:
-        grid = {
-            "flood_risk": 0.3,
-            "heat_index": 0.4,
-            "aqi_avg": 120,
-            "traffic_risk": 0.4,
-            "composite_risk": 0.35,
-            "city": worker.get("city", "Your City"),
-        }
-
-    rainfall_avg = await weather_service.get_rainfall_7d_avg(
-        grid.get("center_lat", 12.93), grid.get("center_lng", 77.62)
-    )
-    premium = calculate_premium(worker, plan, grid, rainfall_avg)
+    try:
+        quote = await build_pricing_quote(worker, plan)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    premium = quote["breakdown"]
+    resolved_grid = quote["resolved_grid"]
+    quote_row = quote["quote"]
 
     now = datetime.now(timezone.utc)
     policy_data = {
@@ -128,6 +110,12 @@ async def subscribe_to_plan(req: SubscribeRequest):
         "start_date": now.date().isoformat(),
         "end_date": (now + timedelta(days=7)).date().isoformat(),
         "total_paid_this_week": 0,
+        "quote_id": quote_row["id"] if quote_row else None,
+        "pricing_version": premium.get("pricing_version"),
+        "resolved_grid_id": resolved_grid["id"],
+        "resolved_city": resolved_grid["city"],
+        "feature_snapshot": quote_row["feature_snapshot"] if quote_row else None,
+        "feature_freshness": quote_row["feature_freshness"] if quote_row else None,
         "mock_payment_id": req.mock_payment_id
         or f"MOCK_{uuid.uuid4().hex[:12]}",
     }
@@ -194,21 +182,13 @@ async def renew_policy(policy_id: str):
     )
     worker = worker_res.data
 
-    grid = get_grid_by_id(worker.get("grid_id", "BLR_05_05"))
-    if not grid:
-        grid = {
-            "flood_risk": 0.3,
-            "heat_index": 0.4,
-            "aqi_avg": 120,
-            "traffic_risk": 0.4,
-            "composite_risk": 0.35,
-            "city": worker.get("city", "Your City"),
-        }
-
-    rainfall_avg = await weather_service.get_rainfall_7d_avg(
-        grid.get("center_lat", 12.93), grid.get("center_lng", 77.62)
-    )
-    premium = calculate_premium(worker, plan, grid, rainfall_avg)
+    try:
+        quote = await build_pricing_quote(worker, plan)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    premium = quote["breakdown"]
+    resolved_grid = quote["resolved_grid"]
+    quote_row = quote["quote"]
 
     now = datetime.now(timezone.utc)
     # Expire old
@@ -229,6 +209,12 @@ async def renew_policy(policy_id: str):
         "persona_factor": premium["persona_factor"],
         "start_date": now.date().isoformat(),
         "end_date": (now + timedelta(days=7)).date().isoformat(),
+        "quote_id": quote_row["id"] if quote_row else None,
+        "pricing_version": premium.get("pricing_version"),
+        "resolved_grid_id": resolved_grid["id"],
+        "resolved_city": resolved_grid["city"],
+        "feature_snapshot": quote_row["feature_snapshot"] if quote_row else None,
+        "feature_freshness": quote_row["feature_freshness"] if quote_row else None,
         "mock_payment_id": f"MOCK_{uuid.uuid4().hex[:12]}",
     }
     result = db.table("policies").insert(new_policy).execute()

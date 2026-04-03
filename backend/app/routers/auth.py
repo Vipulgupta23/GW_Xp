@@ -27,6 +27,11 @@ def _store_dev_otp(email: str) -> None:
     _dev_otp_cache[email] = (_DEV_OTP_CODE, time.time() + _DEV_OTP_TTL_SECONDS)
 
 
+def _is_demo_otp_email(email: str) -> bool:
+    configured = (settings.DEMO_OTP_EMAIL or "").strip().lower()
+    return bool(configured) and email == configured
+
+
 def _validate_dev_otp(email: str, otp: str) -> bool:
     entry = _dev_otp_cache.get(email)
     if not entry:
@@ -78,11 +83,15 @@ async def send_otp(req: SendOTPRequest):
         }
     except Exception as e:
         error_message = str(e)
-        if settings.ENVIRONMENT == "development" and _is_rate_limit_error(error_message):
+        if (
+            settings.ENVIRONMENT == "development"
+            and _is_demo_otp_email(email)
+            and _is_rate_limit_error(error_message)
+        ):
             _store_dev_otp(email)
             return {
                 "success": True,
-                "message": "Supabase OTP rate-limited. Using development OTP fallback.",
+                "message": "Supabase OTP rate-limited for the demo inbox. Using development OTP fallback.",
                 "email_hint": email,
                 "dev_otp": _DEV_OTP_CODE,
             }
@@ -96,7 +105,11 @@ async def verify_otp(req: VerifyOTPRequest):
     email = req.email.strip().lower()
     auth_client = get_supabase_anon()
 
-    if settings.ENVIRONMENT == "development" and _validate_dev_otp(email, req.otp):
+    if (
+        settings.ENVIRONMENT == "development"
+        and _is_demo_otp_email(email)
+        and _validate_dev_otp(email, req.otp)
+    ):
         worker = _get_worker_by_email(email)
         return {
             "success": True,

@@ -85,7 +85,9 @@ body {
   .status-processing { @apply bg-amber-500/20 text-amber-400; }
   .status-soft_flagged { @apply bg-yellow-500/20 text-yellow-400; }
   .status-hard_flagged { @apply bg-red-500/20 text-red-400; }
+  .status-approved_after_review { @apply bg-blue-500/20 text-blue-400; }
   .status-rejected { @apply bg-red-500/20 text-red-400; }
+  .status-cancelled { @apply bg-slate-500/20 text-slate-300; }
 
   .btn-primary {
     @apply bg-amber-500 hover:bg-amber-600 text-slate-900 font-semibold

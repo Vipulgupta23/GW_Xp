@@ -1,12 +1,9 @@
 """
-Seed Database — Generate 225 microgrids (15×15) over Bengaluru
-and insert seed plans. Run once.
+Seed Database — Generate multi-city grid geometry bootstrap and seed plans. Run once.
 """
 
 import os
 import sys
-import numpy as np
-
 # Add parent to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -19,66 +16,34 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or os.getenv("SUPABASE_ANON_KEY", "")
 
 GRID_DEG = 0.009  # ~1km in degrees
-LAT_START, LNG_START = 12.89, 77.54
 
-# Known flood-prone areas in Bengaluru
-FLOOD_PRONE = [
-    (12.920, 12.945, 77.610, 77.640),  # Koramangala
-    (12.905, 12.925, 77.600, 77.625),  # BTM Layout
-    (12.930, 12.950, 77.595, 77.615),  # Ejipura
-]
-
-
-def is_flood_prone(lat: float, lng: float) -> bool:
-    for lat_min, lat_max, lng_min, lng_max in FLOOD_PRONE:
-        if lat_min <= lat <= lat_max and lng_min <= lng <= lng_max:
-            return True
-    return False
-
+CITIES = {
+    "Bengaluru": {"prefix": "BLR", "lat_start": 12.89, "lng_start": 77.54, "rows": 15, "cols": 15},
+    "Mumbai": {"prefix": "MUM", "lat_start": 18.92, "lng_start": 72.82, "rows": 8, "cols": 8},
+    "Delhi NCR": {"prefix": "DEL", "lat_start": 28.50, "lng_start": 77.05, "rows": 8, "cols": 8},
+    "Chennai": {"prefix": "CHE", "lat_start": 12.95, "lng_start": 80.17, "rows": 8, "cols": 8},
+    "Hyderabad": {"prefix": "HYD", "lat_start": 17.31, "lng_start": 78.39, "rows": 8, "cols": 8},
+}
 
 def generate_microgrids() -> list:
-    np.random.seed(42)
     grids = []
 
-    for i in range(15):
-        for j in range(15):
-            lat = LAT_START + i * GRID_DEG
-            lng = LNG_START + j * GRID_DEG
-            clat = lat + GRID_DEG / 2
-            clng = lng + GRID_DEG / 2
+    for city, meta in CITIES.items():
+        for i in range(meta["rows"]):
+            for j in range(meta["cols"]):
+                lat = meta["lat_start"] + i * GRID_DEG
+                lng = meta["lng_start"] + j * GRID_DEG
+                clat = lat + GRID_DEG / 2
+                clng = lng + GRID_DEG / 2
 
-            flood = (
-                0.80
-                if is_flood_prone(clat, clng)
-                else round(np.random.uniform(0.10, 0.50), 2)
-            )
-            heat = round(np.random.uniform(0.30, 0.75), 2)
-            aqi = round(np.random.uniform(80, 220), 1)
-            traffic = round(np.random.uniform(0.30, 0.80), 2)
-            social = round(np.random.uniform(0.10, 0.40), 2)
-            composite = round(
-                flood * 0.35
-                + heat * 0.20
-                + (aqi / 400) * 0.20
-                + traffic * 0.15
-                + social * 0.10,
-                3,
-            )
-
-            grids.append(
-                {
-                    "id": f"BLR_{i:02d}_{j:02d}",
-                    "city": "Bengaluru",
-                    "center_lat": round(clat, 6),
-                    "center_lng": round(clng, 6),
-                    "flood_risk": flood,
-                    "heat_index": heat,
-                    "aqi_avg": aqi,
-                    "traffic_risk": traffic,
-                    "social_risk": social,
-                    "composite_risk": composite,
-                }
-            )
+                grids.append(
+                    {
+                        "id": f"{meta['prefix']}_{i:02d}_{j:02d}",
+                        "city": city,
+                        "center_lat": round(clat, 6),
+                        "center_lng": round(clng, 6),
+                    }
+                )
 
     return grids
 
@@ -119,7 +84,7 @@ def seed_plans(db):
 
 
 def seed_microgrids(db):
-    """Generate and insert 225 microgrids."""
+    """Generate and insert seeded multi-city microgrids."""
     grids = generate_microgrids()
     # Insert in batches
     batch_size = 50
@@ -127,33 +92,6 @@ def seed_microgrids(db):
         batch = grids[i : i + batch_size]
         db.table("microgrids").upsert(batch).execute()
     print(f"  ✅ {len(grids)} microgrids seeded")
-
-
-def create_postgis_function(db):
-    """Create PostGIS lookup function."""
-    sql = """
-    CREATE OR REPLACE FUNCTION find_grid_by_point(p_lat FLOAT, p_lng FLOAT)
-    RETURNS TABLE(
-        id VARCHAR, city VARCHAR, center_lat FLOAT, center_lng FLOAT,
-        flood_risk FLOAT, heat_index FLOAT, aqi_avg FLOAT,
-        traffic_risk FLOAT, social_risk FLOAT, composite_risk FLOAT
-    ) AS $$
-    SELECT id, city, center_lat, center_lng,
-           flood_risk, heat_index, aqi_avg,
-           traffic_risk, social_risk, composite_risk
-    FROM microgrids
-    WHERE ST_Contains(
-        grid_polygon,
-        ST_SetSRID(ST_MakePoint(p_lng, p_lat), 4326)
-    )
-    LIMIT 1;
-    $$ LANGUAGE sql;
-    """
-    try:
-        db.rpc("exec_sql", {"query": sql}).execute()
-        print("  ✅ PostGIS function created")
-    except Exception as e:
-        print(f"  ⚠️  PostGIS function creation skipped (may already exist or PostGIS not enabled): {e}")
 
 
 if __name__ == "__main__":
@@ -166,5 +104,8 @@ if __name__ == "__main__":
     print("🌱 Seeding Incometrix AI database...")
     seed_plans(db)
     seed_microgrids(db)
-    create_postgis_function(db)
+    print(
+        "  ℹ️  Run backend/scripts/populate_microgrid_polygons.sql in Supabase SQL Editor "
+        "to populate grid_polygon and recreate find_grid_by_point."
+    )
     print("\n✅ Database seeding complete!")

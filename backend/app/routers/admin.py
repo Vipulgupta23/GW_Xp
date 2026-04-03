@@ -8,6 +8,8 @@ from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 from app.database import get_supabase
+from app.services.claim_service import get_claim_detail as get_claim_detail_service
+from app.services.pricing_feature_service import feature_health_summary
 from app.services.trigger_engine import (
     create_disruption_and_claims,
     TRIGGERS,
@@ -88,17 +90,31 @@ async def get_admin_stats():
 
 
 @router.get("/claims-queue")
-async def get_claims_queue(limit: int = 50):
+async def get_claims_queue(
+    limit: int = 50,
+    status: Optional[str] = None,
+    claim_origin: Optional[str] = None,
+    reviewable_only: bool = False,
+):
     """Get recent claims for admin review."""
     db = get_supabase()
-    result = (
+    query = (
         db.table("claims")
-        .select("*, workers(name, platform, grid_id), disruption_events(trigger_type, severity)")
+        .select("*, workers(name, platform, grid_id, iss_score), disruption_events(trigger_type, severity, weather_description), payouts(*), claim_events(*)")
         .order("created_at", desc=True)
         .limit(limit)
-        .execute()
     )
-    return result.data or []
+    if status:
+        query = query.eq("status", status)
+    if claim_origin:
+        query = query.eq("claim_origin", claim_origin)
+    if reviewable_only:
+        query = query.in_(
+            "status",
+            ["soft_flagged", "hard_flagged", "manual_submitted", "manual_under_review"],
+        )
+    result = query.execute()
+    return [get_claim_detail_service(row["id"]) for row in (result.data or [])]
 
 
 @router.get("/fraud-list")
@@ -107,12 +123,12 @@ async def get_fraud_list():
     db = get_supabase()
     result = (
         db.table("claims")
-        .select("*, workers(name, platform, iss_score, grid_id)")
-        .in_("status", ["hard_flagged", "soft_flagged"])
+        .select("id")
+        .in_("status", ["hard_flagged", "soft_flagged", "manual_under_review"])
         .order("created_at", desc=True)
         .execute()
     )
-    return result.data or []
+    return [get_claim_detail_service(row["id"]) for row in (result.data or [])]
 
 
 @router.get("/disruptions")
@@ -174,6 +190,12 @@ async def get_daily_stats(days: int = 7):
     return list(daily.values())
 
 
+@router.get("/feature-health")
+async def get_feature_health():
+    """Live pricing feature freshness by city."""
+    return feature_health_summary()
+
+
 @router.post("/simulate-trigger")
 async def simulate_trigger(req: SimulateTriggerRequest):
     """🔴 Demo-only: Manually fire a disruption trigger."""
@@ -216,8 +238,13 @@ async def simulate_trigger(req: SimulateTriggerRequest):
 
     await create_disruption_and_claims(grid, trigger, req.severity, raw_weather)
 
+    demo_note = None
+    if trigger.get("manual_only"):
+        demo_note = "This trigger is demo-simulated only and is not auto-detected by the scheduler."
+
     return {
         "message": f"🔴 Trigger {req.trigger_type} fired for grid {req.grid_id}",
         "severity": req.severity,
         "grid": grid["id"],
+        "demo_note": demo_note,
     }

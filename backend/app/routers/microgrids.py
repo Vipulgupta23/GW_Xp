@@ -4,7 +4,11 @@ Microgrids Router — Zone lookup by coordinates.
 
 from fastapi import APIRouter
 from app.database import get_supabase
-from app.utils.microgrid_utils import find_grid_by_coordinates, infer_city_from_coords
+from app.utils.microgrid_utils import (
+    find_grid_by_coordinates,
+    infer_city_from_coords,
+    is_supported_city,
+)
 
 router = APIRouter(prefix="/microgrids", tags=["microgrids"])
 
@@ -15,11 +19,18 @@ async def lookup_zone(lat: float, lng: float):
     grid = find_grid_by_coordinates(lat, lng)
     if not grid:
         inferred_city = infer_city_from_coords(lat, lng)
+        supported = is_supported_city(inferred_city)
         return {
             "grid": None,
             "risk_level": "Coverage Pending",
-            "label": f"Location detected near {inferred_city}. Local microgrid coverage is being expanded.",
+            "label": (
+                f"Location detected near {inferred_city}. Local microgrid coverage is being expanded."
+                if supported
+                else "This location is outside the currently supported Phase 2 cities."
+            ),
             "message": "No nearby supported microgrid found",
+            "city": inferred_city,
+            "is_supported_city": supported,
         }
 
     risk_level = "High Risk 🔴"
@@ -32,6 +43,8 @@ async def lookup_zone(lat: float, lng: float):
         "grid": grid,
         "risk_level": risk_level,
         "label": f"You're in {grid.get('city', 'Bengaluru')} Zone {grid['id']} — {risk_level}",
+        "city": grid.get("city", "Bengaluru"),
+        "is_supported_city": True,
     }
 
 

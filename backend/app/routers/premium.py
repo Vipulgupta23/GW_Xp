@@ -4,9 +4,7 @@ Premium Router — Dynamic premium calculation endpoint.
 
 from fastapi import APIRouter, HTTPException
 from app.database import get_supabase
-from app.ml.premium_engine import calculate_premium
-from app.utils.microgrid_utils import get_grid_by_id
-from app.services import weather_service
+from app.services.pricing_quote_service import build_pricing_quote
 
 router = APIRouter(prefix="/premium", tags=["premium"])
 
@@ -38,20 +36,8 @@ async def calculate_premium_endpoint(worker_id: str, plan_id: str):
         raise HTTPException(status_code=404, detail="Plan not found")
     plan = plan_res.data
 
-    grid = get_grid_by_id(worker.get("grid_id", "BLR_05_05"))
-    if not grid:
-        grid = {
-            "flood_risk": 0.3,
-            "heat_index": 0.4,
-            "aqi_avg": 120,
-            "traffic_risk": 0.4,
-            "composite_risk": 0.35,
-            "city": "Bengaluru",
-        }
-
-    rainfall_avg = await weather_service.get_rainfall_7d_avg(
-        grid.get("center_lat", 12.93), grid.get("center_lng", 77.62)
-    )
-
-    result = calculate_premium(worker, plan, grid, rainfall_avg)
-    return result
+    try:
+        quote = await build_pricing_quote(worker, plan)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    return quote["breakdown"]

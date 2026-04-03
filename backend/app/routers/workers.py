@@ -7,7 +7,16 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.database import get_supabase
-from app.utils.microgrid_utils import find_grid_by_coordinates, infer_city_from_coords
+from app.services import weather_service
+from app.services.pricing_feature_service import get_grid_features
+from app.services.pricing_config_service import get_active_pricing_config
+from app.services.pricing_quote_service import build_pricing_quote
+from app.utils.microgrid_utils import (
+    find_grid_by_coordinates,
+    infer_city_from_coords,
+    is_supported_city,
+    get_city_by_name,
+)
 from app.ml.persona_classifier import classify_persona
 
 router = APIRouter(prefix="/workers", tags=["workers"])
@@ -20,7 +29,7 @@ class RegisterRequest(BaseModel):
     platform: str  # zomato, swiggy, zepto, amazon
     zone_lat: float = 12.9352
     zone_lng: float = 77.6245
-    city: Optional[str] = "Bengaluru"
+    city: Optional[str] = None
 
 
 class LinkPlatformRequest(BaseModel):
@@ -47,7 +56,11 @@ async def register_worker(req: RegisterRequest):
     # Find microgrid via PostGIS
     grid = find_grid_by_coordinates(req.zone_lat, req.zone_lng)
     grid_id = grid["id"] if grid else None
-    detected_city = grid.get("city") if grid else infer_city_from_coords(req.zone_lat, req.zone_lng)
+    detected_city = (
+        grid.get("city")
+        if grid
+        else infer_city_from_coords(req.zone_lat, req.zone_lng)
+    )
 
     # Classify initial persona (defaults for new worker)
     persona = classify_persona(
@@ -64,7 +77,7 @@ async def register_worker(req: RegisterRequest):
         "zone_lat": req.zone_lat,
         "zone_lng": req.zone_lng,
         "grid_id": grid_id,
-        "city": req.city or detected_city,
+        "city": detected_city if is_supported_city(detected_city) else (req.city or detected_city),
         "persona": persona,
         "iss_score": 50.0,
         "is_verified": False,
@@ -156,3 +169,162 @@ async def get_iss_history(worker_id: str):
         .execute()
     )
     return result.data or []
+
+
+@router.get("/{worker_id}/protection-status")
+async def get_protection_status(worker_id: str):
+    """Worker-safe summary for the dashboard."""
+    db = get_supabase()
+
+    worker_res = (
+        db.table("workers")
+        .select("*")
+        .eq("id", worker_id)
+        .single()
+        .execute()
+    )
+    if not worker_res.data:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    worker = worker_res.data
+
+    policy_res = (
+        db.table("policies")
+        .select("*, plans(*)")
+        .eq("worker_id", worker_id)
+        .eq("status", "active")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    policy = policy_res.data[0] if policy_res.data else None
+
+    disruption = None
+    if worker.get("grid_id"):
+        disruption_res = (
+            db.table("disruption_events")
+            .select("*")
+            .eq("grid_id", worker["grid_id"])
+            .eq("is_active", True)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        disruption = disruption_res.data[0] if disruption_res.data else None
+
+    latest_claim_res = (
+        db.table("claims")
+        .select("*")
+        .eq("worker_id", worker_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    latest_claim = latest_claim_res.data[0] if latest_claim_res.data else None
+
+    weather = await weather_service.get_current(
+        worker.get("zone_lat", 12.9352),
+        worker.get("zone_lng", 77.6245),
+    )
+    next_hours_label = (
+        f"Next 6h outlook · {weather.get('description', 'clear').title()}"
+    )
+
+    banner = {
+        "is_active": False,
+        "title": "No active disruption in your zone",
+        "description": next_hours_label,
+        "earning_drop": "₹0–₹0",
+        "risk_percent": 20,
+        "coverage_active": bool(policy),
+    }
+
+    if disruption:
+        estimated_gap = 0
+        if latest_claim and latest_claim.get("disruption_id") == disruption.get("id"):
+            estimated_gap = int(latest_claim.get("income_gap", 0))
+        else:
+            estimated_gap = int(worker.get("avg_daily_earnings", 900) * 0.35)
+        banner = {
+            "is_active": True,
+            "title": disruption.get("trigger_type", "disruption").replace("_", " ").title(),
+            "description": disruption.get("weather_description") or "Automation detected a disruption in your insured zone.",
+            "earning_drop": f"₹{max(estimated_gap - 120, 0)}–₹{estimated_gap + 120}",
+            "risk_percent": min(95, int((disruption.get("severity", 0) / max(disruption.get("threshold", 1), 1)) * 70) + 25),
+            "coverage_active": bool(policy),
+        }
+
+    claim_status_label = None
+    if latest_claim:
+        claim_status_label = latest_claim.get("status", "processing").replace("_", " ")
+
+    return {
+        "worker": {
+            "id": worker["id"],
+            "name": worker.get("name"),
+            "city": worker.get("city"),
+            "grid_id": worker.get("grid_id"),
+            "iss_score": worker.get("iss_score", 50),
+        },
+        "coverage": {
+            "is_supported_city": is_supported_city(worker.get("city", "")),
+            "policy_active": bool(policy),
+            "policy": policy,
+        },
+        "active_disruption": disruption,
+        "latest_claim": latest_claim,
+        "claim_status_label": claim_status_label,
+        "banner": banner,
+    }
+
+
+@router.get("/{worker_id}/pricing-context")
+async def get_pricing_context(worker_id: str):
+    """Expose live pricing inputs and freshness for the worker's current grid."""
+    db = get_supabase()
+    worker_res = (
+        db.table("workers")
+        .select("*")
+        .eq("id", worker_id)
+        .single()
+        .execute()
+    )
+    if not worker_res.data:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    worker = worker_res.data
+
+    if not worker.get("grid_id"):
+        raise HTTPException(status_code=400, detail="Worker has no supported pricing grid")
+
+    from app.utils.microgrid_utils import get_grid_by_id
+
+    grid = get_grid_by_id(worker["grid_id"])
+    if not grid:
+        raise HTTPException(status_code=404, detail="Pricing grid not found")
+    city_meta = get_city_by_name(grid["city"])
+    if not city_meta:
+        raise HTTPException(status_code=404, detail="Supported city metadata missing")
+
+    try:
+        feature_row = await get_grid_features(grid, city_meta)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    config = get_active_pricing_config()
+    plan_res = db.table("plans").select("*").eq("id", "plus").single().execute()
+    try:
+        quote = await build_pricing_quote(worker, plan_res.data)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    return {
+        "worker_id": worker_id,
+        "city": city_meta["name"],
+        "grid_id": grid["id"],
+        "pricing_version": config["version"],
+        "feature_snapshot": feature_row["feature_snapshot"],
+        "feature_freshness": {
+            "status": feature_row.get("source_status", "fresh"),
+            "observed_at": feature_row.get("observed_at"),
+            "expires_at": feature_row.get("expires_at"),
+        },
+        "sample_quote": quote["breakdown"],
+    }

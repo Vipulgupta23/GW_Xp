@@ -1,42 +1,64 @@
 """
-Claims Router — Claims history, detail view, manual trigger for demo.
+Claims Router — Worker claims, detail view, fallback submission, and admin review actions.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
+from pydantic import BaseModel
+
 from app.database import get_supabase
+from app.services.claim_service import (
+    approve_claim_review,
+    get_claim_detail as get_claim_detail_service,
+    get_claims_for_worker,
+    get_worker_fallback_eligibility,
+    reject_claim_review,
+    submit_fallback_claim,
+)
 
 router = APIRouter(prefix="/claims", tags=["claims"])
 
 
+class ReviewClaimRequest(BaseModel):
+    reviewer: str = "admin"
+    reason: str | None = None
+    note: str | None = None
+
+
+class FallbackClaimRequest(BaseModel):
+    worker_id: str
+    disruption_id: str
+    reason: str | None = None
+
+
 @router.get("/worker/{worker_id}")
 async def get_worker_claims(worker_id: str, limit: int = 10):
-    """Get claims for a worker."""
-    db = get_supabase()
-    result = (
-        db.table("claims")
-        .select("*, disruption_events(*)")
-        .eq("worker_id", worker_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    return result.data or []
+    """Get worker claims with fallback eligibility summary."""
+    return {
+        "claims": get_claims_for_worker(worker_id, limit=limit),
+        "eligibility": get_worker_fallback_eligibility(worker_id),
+    }
+
+
+@router.get("/eligibility/{worker_id}")
+async def get_claim_eligibility(worker_id: str):
+    """Get fallback eligibility windows for missed disruptions."""
+    return get_worker_fallback_eligibility(worker_id)
+
+
+@router.post("/fallback")
+async def create_fallback_claim(req: FallbackClaimRequest):
+    """Create a controlled fallback claim for a missed automated disruption."""
+    claim = submit_fallback_claim(req.worker_id, req.disruption_id, req.reason)
+    return {
+        "message": "Fallback claim submitted for review",
+        "claim": claim,
+    }
 
 
 @router.get("/{claim_id}")
 async def get_claim_detail(claim_id: str):
-    """Get full claim details including simulation."""
-    db = get_supabase()
-    result = (
-        db.table("claims")
-        .select("*, disruption_events(*), payouts(*)")
-        .eq("id", claim_id)
-        .single()
-        .execute()
-    )
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Claim not found")
-    return result.data
+    """Get full claim detail including payouts, events, and fraud summary."""
+    return get_claim_detail_service(claim_id)
 
 
 @router.get("/payouts/{worker_id}")
@@ -55,82 +77,26 @@ async def get_worker_payouts(worker_id: str):
 
 
 @router.put("/{claim_id}/approve")
-async def approve_claim(claim_id: str):
-    """Manually approve a flagged claim (admin action)."""
-    db = get_supabase()
-
-    claim_res = (
-        db.table("claims")
-        .select("*")
-        .eq("id", claim_id)
-        .single()
-        .execute()
+async def approve_claim(claim_id: str, req: ReviewClaimRequest | None = None):
+    """Approve a flagged or manual-review claim."""
+    payload = req or ReviewClaimRequest()
+    claim = approve_claim_review(
+        claim_id,
+        reviewer=payload.reviewer,
+        reason=payload.reason,
+        note=payload.note,
     )
-    if not claim_res.data:
-        raise HTTPException(status_code=404, detail="Claim not found")
-
-    claim = claim_res.data
-
-    # Update claim status
-    db.table("claims").update({"status": "approved"}).eq(
-        "id", claim_id
-    ).execute()
-
-    # If was soft_flagged, pay remaining 30%
-    if claim["status"] == "soft_flagged" and claim["payout_amount"] > 0:
-        remaining = round(claim["payout_amount"] * 0.30 / 0.70, 2)
-        db.table("payouts").insert(
-            {
-                "claim_id": claim_id,
-                "worker_id": claim["worker_id"],
-                "amount": remaining,
-                "status": "paid",
-                "upi_id": "worker@upi",
-                "mock_payout_id": f"TOPUP_{claim_id[:8]}",
-            }
-        ).execute()
-
-    # ISS trust bonus
-    db.table("workers").update(
-        {"iss_score": min(claim.get("iss_score", 50) + 3, 100)}
-    ).eq("id", claim["worker_id"]).execute()
-
-    return {"message": "Claim approved", "claim_id": claim_id}
+    return {"message": "Claim approved after review", "claim": claim}
 
 
 @router.put("/{claim_id}/reject")
-async def reject_claim(claim_id: str):
-    """Reject a flagged claim (admin action)."""
-    db = get_supabase()
-
-    claim_res = (
-        db.table("claims")
-        .select("*")
-        .eq("id", claim_id)
-        .single()
-        .execute()
+async def reject_claim(claim_id: str, req: ReviewClaimRequest | None = None):
+    """Reject a flagged or manual-review claim."""
+    payload = req or ReviewClaimRequest()
+    claim = reject_claim_review(
+        claim_id,
+        reviewer=payload.reviewer,
+        reason=payload.reason,
+        note=payload.note,
     )
-    if not claim_res.data:
-        raise HTTPException(status_code=404, detail="Claim not found")
-
-    claim = claim_res.data
-
-    db.table("claims").update(
-        {"status": "rejected", "payout_amount": 0}
-    ).eq("id", claim_id).execute()
-
-    # ISS penalty
-    worker_res = (
-        db.table("workers")
-        .select("iss_score")
-        .eq("id", claim["worker_id"])
-        .single()
-        .execute()
-    )
-    if worker_res.data:
-        new_iss = max(worker_res.data["iss_score"] - 10, 0)
-        db.table("workers").update({"iss_score": new_iss}).eq(
-            "id", claim["worker_id"]
-        ).execute()
-
-    return {"message": "Claim rejected", "claim_id": claim_id}
+    return {"message": "Claim rejected", "claim": claim}

@@ -115,6 +115,62 @@ Tomorrow's Forecast for Your Zone:
 - Incometrix **pre-validates** workers before the event (reducing fraud)
 - Builds **massive trust** — "Incometrix told me about the rain before it happened"
 
+## Phase 2 Runbook
+
+### Backend setup
+
+1. Create `backend/.env` with Supabase, Redis, and optional weather/AQI keys.
+2. Run the schema in `backend/scripts/init_schema.sql`.
+3. Run `backend/scripts/live_pricing_schema.sql`.
+4. Bootstrap the top-20 city registry, microgrids, and active pricing config:
+
+```bash
+cd backend
+python scripts/bootstrap_live_pricing.py
+```
+
+5. Populate grid polygons and PostGIS lookup with `backend/scripts/populate_microgrid_polygons.sql`.
+6. Refresh live pricing features:
+
+```bash
+cd backend
+python scripts/refresh_live_features.py
+```
+
+7. Seed plans and multi-city microgrids if you still need the legacy bootstrap:
+
+```bash
+cd backend
+python scripts/seed_db.py
+```
+
+8. Start the API:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+### Frontend setup
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### Demo flow
+
+1. Register a worker with OTP, onboarding, and city-aware location lookup.
+2. Pick a plan and confirm the dynamic weekly premium breakdown from live city/grid features.
+3. Open the worker dashboard to verify the live protection banner and policy state.
+4. Open `/admin/claims` and use `Simulate Disruption` for:
+   - `heavy_rainfall`
+   - `extreme_heat`
+   - `severe_aqi`
+   - `flood_alert`
+   - `platform_outage` (demo-simulated only)
+5. Show one auto-paid claim and one flagged claim that is reviewed from the admin flow.
+
 ---
 
 # 👤 Deep Persona Intelligence

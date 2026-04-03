@@ -3,6 +3,7 @@ interface Claim {
   trigger_type: string;
   status: string;
   payout_amount: number;
+  claim_origin?: string;
   fraud_score: number;
   created_at: string;
   workers?: { name: string; platform: string; grid_id: string };
@@ -52,7 +53,9 @@ export default function ClaimsTable({ claims, onSelectClaim, onApprove, onReject
               >
                 <td className="px-4 py-3">
                   <p className="text-white font-medium">{claim.workers?.name || "Worker"}</p>
-                  <p className="text-slate-500 text-xs capitalize">{claim.workers?.platform}</p>
+                  <p className="text-slate-500 text-xs capitalize">
+                    {claim.workers?.platform} · {(claim.claim_origin || "auto").replace(/_/g, " ")}
+                  </p>
                 </td>
                 <td className="px-4 py-3">
                   <span className="flex items-center gap-1.5">
@@ -63,7 +66,7 @@ export default function ClaimsTable({ claims, onSelectClaim, onApprove, onReject
                 <td className="px-4 py-3 text-right font-bold text-emerald-400">Rs {claim.payout_amount.toFixed(0)}</td>
                 <td className="px-4 py-3 text-center">
                   <span className={`status-badge status-${claim.status}`}>
-                    {claim.status.replace("_", " ")}
+                    {claim.status === "approved_after_review" ? "approved after review" : claim.status.replace("_", " ")}
                   </span>
                 </td>
                 <td className="px-4 py-3 text-center">
@@ -79,7 +82,7 @@ export default function ClaimsTable({ claims, onSelectClaim, onApprove, onReject
                   {new Date(claim.created_at).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
                 </td>
                 <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                  {(claim.status === "soft_flagged" || claim.status === "hard_flagged") && (
+                  {(claim.status === "soft_flagged" || claim.status === "hard_flagged" || claim.status === "manual_under_review" || claim.status === "manual_submitted") && (
                     <div className="flex gap-1 justify-center">
                       <button
                         onClick={() => onApprove(claim.id)}

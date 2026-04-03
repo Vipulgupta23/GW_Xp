@@ -24,6 +24,10 @@ interface Plan {
     season_label: string;
     iss_label: string;
     persona_label: string;
+    coverage_hours?: number;
+    coverage_hours_label?: string;
+    pricing_story?: string;
+    waterlogging_adjustment?: number;
   };
 }
 
@@ -157,6 +161,9 @@ export default function PolicyPage() {
                     seasonLabel={plan.premium_details.season_label}
                     issLabel={plan.premium_details.iss_label}
                     personaLabel={plan.premium_details.persona_label}
+                    coverageHours={plan.premium_details.coverage_hours}
+                    coverageHoursLabel={plan.premium_details.coverage_hours_label}
+                    pricingStory={plan.premium_details.pricing_story}
                     compact
                   />
                 </div>
@@ -176,6 +183,12 @@ export default function PolicyPage() {
                   <span className="text-slate-400">Coverage: {(plan.coverage_pct * 100).toFixed(0)}%</span>
                   <span className="text-slate-400">Max: ₹{plan.max_weekly_payout.toLocaleString()}/week</span>
                 </div>
+                {plan.premium_details.coverage_hours && (
+                  <div className="mb-4 rounded-lg border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-xs text-cyan-100">
+                    Protected for up to <span className="font-semibold">{plan.premium_details.coverage_hours} hours</span> this week
+                    {plan.premium_details.coverage_hours_label ? ` · ${plan.premium_details.coverage_hours_label}` : ""}
+                  </div>
+                )}
 
                 {/* CTA */}
                 {isActive ? (

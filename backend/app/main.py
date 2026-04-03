@@ -50,6 +50,8 @@ app.add_middleware(
         settings.FRONTEND_URL,
         "http://localhost:3000",
         "http://localhost:3001",
+        "http://localhost:3010",
+        "http://127.0.0.1:3010",
         "https://incometrix.vercel.app",
     ],
     allow_credentials=True,

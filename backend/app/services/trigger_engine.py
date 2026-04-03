@@ -10,8 +10,9 @@ from app.config import settings
 from app.database import get_supabase
 from app.redis_client import get_redis
 from app.services import weather_service, aqi_service
-from app.ml import earning_simulator, fraud_engine
-from app.utils.explanation_generator import generate_explanation
+from app.services.claim_service import create_claim_for_disruption
+from app.services.pricing_feature_service import refresh_grid_features
+from app.utils.microgrid_utils import get_city_by_name
 
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
@@ -37,6 +38,21 @@ TRIGGERS = [
         "unit": "AQI",
         "payout_max": 350,
     },
+    {
+        "type": "flood_alert",
+        "param": "flood_score",
+        "threshold": 0.78,
+        "unit": "score",
+        "payout_max": 550,
+    },
+    {
+        "type": "platform_outage",
+        "param": "platform_outage_score",
+        "threshold": 0.95,
+        "unit": "score",
+        "payout_max": 300,
+        "manual_only": True,
+    },
 ]
 
 
@@ -54,6 +70,10 @@ def start_scheduler():
     @scheduler.scheduled_job("interval", minutes=interval, id="poll_zones")
     async def poll_all_zones():
         await _poll_all_zones()
+
+    @scheduler.scheduled_job("interval", minutes=interval, id="refresh_live_features")
+    async def refresh_live_features_job():
+        await _refresh_active_grid_features()
 
     if not scheduler.running:
         scheduler.start()
@@ -99,9 +119,16 @@ async def _poll_all_zones():
             "rain_6h": weather.get("rain_6h", 0),
             "temp": weather.get("temp", 30),
             "aqi": aqi_val,
+            "flood_score": max(
+                grid.get("flood_risk", 0),
+                min(1.0, weather.get("rain_6h", 0) / 60),
+            ),
+            "platform_outage_score": 0.0,
         }
 
         for trigger in TRIGGERS:
+            if trigger.get("manual_only"):
+                continue
             value = measurements.get(trigger["param"], 0)
             if value >= trigger["threshold"]:
                 dedup_key = (
@@ -112,6 +139,38 @@ async def _poll_all_zones():
                     await create_disruption_and_claims(
                         grid, trigger, value, weather
                     )
+
+
+async def _refresh_active_grid_features():
+    """Refresh live pricing features for active worker grids."""
+    db = get_supabase()
+    workers_res = (
+        db.table("workers")
+        .select("grid_id")
+        .eq("is_active", True)
+        .execute()
+    )
+    grid_ids = list(
+        set(w["grid_id"] for w in (workers_res.data or []) if w.get("grid_id"))
+    )
+    for grid_id in grid_ids:
+        grid_res = (
+            db.table("microgrids")
+            .select("*")
+            .eq("id", grid_id)
+            .single()
+            .execute()
+        )
+        grid = grid_res.data
+        if not grid:
+            continue
+        city_meta = get_city_by_name(grid.get("city", ""))
+        if not city_meta:
+            continue
+        try:
+            await refresh_grid_features(grid, city_meta, force=True)
+        except Exception as e:
+            print(f"⚠️  Feature refresh failed for {grid_id}: {e}")
 
 
 async def create_disruption_and_claims(
@@ -176,123 +235,15 @@ async def _process_claim(
     plan: dict,
 ):
     """Full Zero-Touch pipeline — no worker action needed."""
-    db = get_supabase()
-
-    # Layer-1 support checks from database context.
-    existing_claim_res = (
-        db.table("claims")
-        .select("id")
-        .eq("worker_id", worker["id"])
-        .eq("disruption_id", disruption["id"])
-        .limit(1)
-        .execute()
-    )
-    has_duplicate_claim = bool(existing_claim_res.data)
-
-    policy_after_event = False
-    try:
-        policy_start = datetime.fromisoformat(f"{policy['start_date']}T00:00:00+00:00")
-        disruption_started = datetime.fromisoformat(
-            disruption["started_at"].replace("Z", "+00:00")
-        )
-        policy_after_event = policy_start > disruption_started
-    except Exception:
-        policy_after_event = False
-
-    # Fraud Layer 1
-    l1 = fraud_engine.run_fraud_layer1(
+    claim = create_claim_for_disruption(
         worker,
         disruption,
-        has_duplicate_claim=has_duplicate_claim,
-        policy_after_event=policy_after_event,
+        policy,
+        plan,
+        claim_origin="auto",
     )
-
-    # Earning simulation
-    sim = earning_simulator.calculate(worker, disruption)
-
-    # Payout calculation
-    coverage_pct = plan.get("coverage_pct", 0.70)
-    max_weekly = plan.get("max_weekly_payout", 2500)
-    income_gap = sim["income_gap"]
-    payout = min(income_gap * coverage_pct, max_weekly)
-    payout = max(round(payout, 2), 0)
-
-    # Fraud Layer 2
-    l2 = fraud_engine.run_fraud_layer2(worker, sim, income_gap)
-
-    # Fraud Layer 3 (Isolation Forest)
-    l3 = fraud_engine.run_fraud_layer3(
-        payout, income_gap, sim["disruption_hours"], worker
-    )
-
-    # Determine status
-    if not l1["pass"]:
-        status = "hard_flagged"
-        final_payout = 0
-    elif not l2["pass"] or not l3["pass"]:
-        status = "soft_flagged"
-        final_payout = round(payout * 0.70, 2)
-    else:
-        status = "approved"
-        final_payout = payout
-
-    # Worker info with coverage for explanation
-    worker_for_explain = {**worker, "coverage_pct": coverage_pct}
-
-    # Generate Hinglish explanation
-    explanation = generate_explanation(
-        worker_for_explain, sim, final_payout, trigger["type"]
-    )
-
-    # Compute fraud score 0-1
-    all_flags = l1["flags"] + l2["flags"] + l3["flags"]
-    fraud_score = min(len(all_flags) * 0.25, 1.0)
-
-    # Save claim
-    claim_data = {
-        "worker_id": worker["id"],
-        "policy_id": policy["id"],
-        "disruption_id": disruption["id"],
-        "trigger_type": trigger["type"],
-        "status": status,
-        "actual_earnings": sim["actual_earnings"],
-        "simulated_earnings": sim["simulated_earnings"],
-        "income_gap": income_gap,
-        "payout_amount": final_payout,
-        "coverage_pct": coverage_pct,
-        "fraud_score": fraud_score,
-        "fraud_layer1_pass": l1["pass"],
-        "fraud_layer2_pass": l2["pass"],
-        "fraud_layer3_pass": l3["pass"],
-        "fraud_flags": all_flags,
-        "earning_simulation": sim,
-        "hinglish_explanation": explanation,
-        "processed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    claim_res = db.table("claims").insert(claim_data).execute()
-    claim = claim_res.data[0] if claim_res.data else None
     if not claim:
         return
-
-    # Create payout if approved or soft_flagged
-    if final_payout > 0:
-        payout_data = {
-            "claim_id": claim["id"],
-            "worker_id": worker["id"],
-            "amount": final_payout,
-            "upi_id": "worker@upi",
-            "status": "paid",
-            "mock_payout_id": f"MOCK_PAY_{claim['id'][:8]}",
-            "paid_at": datetime.now(timezone.utc).isoformat(),
-            "whatsapp_shown": False,
-        }
-        db.table("payouts").insert(payout_data).execute()
-
-        # Update claim to paid
-        db.table("claims").update({"status": "paid"}).eq(
-            "id", claim["id"]
-        ).execute()
-
     print(
-        f"  ✅ Claim {status} for {worker.get('name', 'worker')}: ₹{final_payout}"
+        f"  ✅ Claim {claim.get('status', 'processing')} for {worker.get('name', 'worker')}: ₹{claim.get('payout_amount', 0)}"
     )
