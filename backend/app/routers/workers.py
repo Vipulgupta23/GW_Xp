@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.database import get_supabase
+from app.services.live_grid_service import get_live_grid_detail
 from app.services import weather_service
 from app.services.pricing_feature_service import get_grid_features
 from app.services.pricing_config_service import get_active_pricing_config
@@ -213,13 +214,33 @@ async def get_protection_status(worker_id: str):
 
     latest_claim_res = (
         db.table("claims")
-        .select("*")
+        .select("*, payouts(*)")
         .eq("worker_id", worker_id)
         .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
     latest_claim = latest_claim_res.data[0] if latest_claim_res.data else None
+    latest_payout = None
+    payout_summary = {
+        "paid_amount": 0,
+        "held_amount": 0,
+        "latest_status": None,
+    }
+    if latest_claim:
+        payouts = latest_claim.get("payouts") or []
+        latest_payout = payouts[0] if payouts else None
+        payout_summary = {
+            "paid_amount": round(
+                sum(float(p.get("amount", 0)) for p in payouts if p.get("status") == "paid"),
+                2,
+            ),
+            "held_amount": round(
+                sum(float(p.get("amount", 0)) for p in payouts if p.get("status") == "held_for_review"),
+                2,
+            ),
+            "latest_status": latest_payout.get("status") if latest_payout else None,
+        }
 
     weather = await weather_service.get_current(
         worker.get("zone_lat", 12.9352),
@@ -253,6 +274,17 @@ async def get_protection_status(worker_id: str):
             "coverage_active": bool(policy),
         }
 
+    grid_live_status = (
+        get_live_grid_detail(worker["grid_id"])
+        if worker.get("grid_id")
+        else None
+    )
+    disruption_origin = (
+        ((disruption or {}).get("raw_data") or {}).get("trigger_origin")
+        if disruption
+        else None
+    )
+
     claim_status_label = None
     if latest_claim:
         claim_status_label = latest_claim.get("status", "processing").replace("_", " ")
@@ -270,8 +302,12 @@ async def get_protection_status(worker_id: str):
             "policy_active": bool(policy),
             "policy": policy,
         },
+        "grid_live_status": grid_live_status,
         "active_disruption": disruption,
+        "disruption_origin": disruption_origin,
         "latest_claim": latest_claim,
+        "latest_payout": latest_payout,
+        "payout_summary": payout_summary,
         "claim_status_label": claim_status_label,
         "banner": banner,
     }

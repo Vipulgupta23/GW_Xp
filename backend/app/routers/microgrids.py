@@ -2,10 +2,14 @@
 Microgrids Router — Zone lookup by coordinates.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.database import get_supabase
+from app.services.live_grid_service import get_live_grid_detail, get_live_grids
+from app.services.pricing_feature_service import refresh_grid_features
 from app.utils.microgrid_utils import (
     find_grid_by_coordinates,
+    get_city_by_name,
+    get_grid_by_id,
     infer_city_from_coords,
     is_supported_city,
 )
@@ -61,6 +65,37 @@ async def get_all_grids():
         .execute()
     )
     return result.data or []
+
+
+@router.get("/live")
+async def get_live_grid_status(city: str | None = None, active_only: bool = False):
+    """Live grid state for admin and worker maps."""
+    return get_live_grids(city=city, active_only=active_only)
+
+
+@router.get("/{grid_id}/live-detail")
+async def get_grid_live_detail(grid_id: str):
+    """Detailed live grid state for map side panels."""
+    detail = get_live_grid_detail(grid_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Grid not found")
+    return detail
+
+
+@router.post("/{grid_id}/refresh-live")
+async def refresh_live_grid_detail(grid_id: str):
+    """Force refresh a specific grid's live weather/AQI features."""
+    grid = get_grid_by_id(grid_id)
+    if not grid:
+        raise HTTPException(status_code=404, detail="Grid not found")
+    city_meta = get_city_by_name(grid.get("city", ""))
+    if not city_meta:
+        raise HTTPException(status_code=404, detail="Supported city metadata missing")
+    await refresh_grid_features(grid, city_meta, force=True)
+    detail = get_live_grid_detail(grid_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Grid not found after refresh")
+    return detail
 
 
 @router.get("/{grid_id}")

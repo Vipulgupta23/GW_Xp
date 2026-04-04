@@ -137,7 +137,7 @@ async def _poll_all_zones():
                 if not redis.exists(dedup_key):
                     redis.set(dedup_key, "1", ex=21600)  # 6hr TTL
                     await create_disruption_and_claims(
-                        grid, trigger, value, weather
+                        grid, trigger, value, weather, trigger_origin="live_detected"
                     )
 
 
@@ -174,10 +174,53 @@ async def _refresh_active_grid_features():
 
 
 async def create_disruption_and_claims(
-    grid: dict, trigger: dict, measured_value: float, raw_weather: dict
+    grid: dict,
+    trigger: dict,
+    measured_value: float,
+    raw_weather: dict,
+    trigger_origin: str = "live_detected",
 ):
     """Create a disruption event and process claims for all affected workers."""
     db = get_supabase()
+    started_at = datetime.now(timezone.utc).isoformat()
+    since = datetime.now(timezone.utc).timestamp() - 21600
+    since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat()
+
+    existing_res = (
+        db.table("disruption_events")
+        .select("*")
+        .eq("grid_id", grid["id"])
+        .eq("trigger_type", trigger["type"])
+        .gte("started_at", since_iso)
+        .order("started_at", desc=True)
+        .limit(10)
+        .execute()
+    )
+    recent_same_type = []
+    for row in existing_res.data or []:
+        row_started = row.get("started_at")
+        if not row_started:
+            continue
+        try:
+            row_dt = datetime.fromisoformat(row_started.replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - row_dt).total_seconds() <= 21600:
+                recent_same_type.append(row)
+        except Exception:
+            continue
+    if recent_same_type:
+        existing = recent_same_type[0]
+        return {
+            "disruption": existing,
+            "trigger_origin": ((existing.get("raw_data") or {}).get("trigger_origin") or trigger_origin),
+            "duplicate": True,
+            "affected_worker_count": 0,
+            "claims_created": 0,
+            "auto_paid_claims": 0,
+            "flagged_claims": 0,
+            "manual_review_claims": 0,
+            "paid_payouts": 0,
+            "held_payouts": 0,
+        }
 
     # 1. Create disruption event
     disruption_data = {
@@ -188,8 +231,12 @@ async def create_disruption_and_claims(
         "threshold": trigger["threshold"],
         "weather_description": raw_weather.get("description", ""),
         "is_active": True,
-        "raw_data": raw_weather,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "raw_data": {
+            **raw_weather,
+            "trigger_origin": trigger_origin,
+            "source_status": "manual" if trigger_origin == "admin_manual" else "live",
+        },
+        "started_at": started_at,
     }
     disruption_res = (
         db.table("disruption_events").insert(disruption_data).execute()
@@ -197,7 +244,7 @@ async def create_disruption_and_claims(
     disruption = disruption_res.data[0] if disruption_res.data else None
     if not disruption:
         print(f"❌ Failed to create disruption: {trigger['type']}")
-        return
+        return None
 
     # 2. Get all insured workers in this grid
     workers_res = (
@@ -207,6 +254,14 @@ async def create_disruption_and_claims(
         .eq("is_active", True)
         .execute()
     )
+
+    affected_worker_count = 0
+    claims_created = 0
+    auto_paid_claims = 0
+    flagged_claims = 0
+    manual_review_claims = 0
+    paid_payouts = 0
+    held_payouts = 0
 
     for worker in workers_res.data or []:
         # Check worker has active policy
@@ -222,9 +277,35 @@ async def create_disruption_and_claims(
         if not policy_res.data:
             continue
 
+        affected_worker_count += 1
         policy = policy_res.data[0]
         plan = policy.get("plans", {})
-        await _process_claim(worker, disruption, trigger, policy, plan)
+        claim = await _process_claim(worker, disruption, trigger, policy, plan)
+        if not claim:
+            continue
+        claims_created += 1
+        if claim.get("status") == "paid":
+            auto_paid_claims += 1
+            paid_payouts += 1
+        elif claim.get("status") in {"soft_flagged", "hard_flagged"}:
+            flagged_claims += 1
+            if claim.get("latest_payout_status") == "held_for_review":
+                held_payouts += 1
+        elif claim.get("status") in {"manual_submitted", "manual_under_review"}:
+            manual_review_claims += 1
+
+    return {
+        "disruption": disruption,
+        "trigger_origin": trigger_origin,
+        "duplicate": False,
+        "affected_worker_count": affected_worker_count,
+        "claims_created": claims_created,
+        "auto_paid_claims": auto_paid_claims,
+        "flagged_claims": flagged_claims,
+        "manual_review_claims": manual_review_claims,
+        "paid_payouts": paid_payouts,
+        "held_payouts": held_payouts,
+    }
 
 
 async def _process_claim(

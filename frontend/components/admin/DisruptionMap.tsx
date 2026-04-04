@@ -5,33 +5,32 @@ import "leaflet/dist/leaflet.css";
 
 interface Grid {
   id: string;
+  city: string;
   center_lat: number;
   center_lng: number;
-  flood_risk: number;
-  composite_risk: number;
-}
-
-interface Disruption {
-  id: string;
-  grid_id: string;
-  trigger_type: string;
-  severity: number;
+  map_color: string;
+  state_label: string;
+  risk_percent: number;
+  insured_worker_count: number;
+  feature_snapshot?: {
+    flood_risk?: number;
+    aqi?: number;
+    heat_index?: number;
+    rain_6h?: number;
+    weather_description?: string;
+  };
+  active_disruption_count: number;
 }
 
 interface Props {
   grids: Grid[];
-  disruptions: Disruption[];
+  selectedGridId?: string | null;
+  onSelectGrid?: (gridId: string) => void;
 }
 
 const GRID_DEG = 0.009;
 
-function getGridColor(risk: number): string {
-  if (risk > 0.6) return "#EF4444";
-  if (risk > 0.35) return "#FBBF24";
-  return "#10B981";
-}
-
-export default function DisruptionMap({ grids, disruptions }: Props) {
+export default function DisruptionMap({ grids, selectedGridId, onSelectGrid }: Props) {
   const mapRef = useRef<HTMLDivElement>(null);
   const leafletMap = useRef<L.Map | null>(null);
 
@@ -69,8 +68,6 @@ export default function DisruptionMap({ grids, disruptions }: Props) {
       }
     });
 
-    const activeGridIds = new Set(disruptions.map((d) => d.grid_id));
-
     // Draw microgrid polygons
     grids.forEach((grid) => {
       const lat = grid.center_lat - GRID_DEG / 2;
@@ -81,25 +78,33 @@ export default function DisruptionMap({ grids, disruptions }: Props) {
         [lat + GRID_DEG, lng + GRID_DEG],
       ];
 
-      const isDisrupted = activeGridIds.has(grid.id);
-      const color = isDisrupted ? "#EF4444" : getGridColor(grid.composite_risk);
+      const isDisrupted = grid.active_disruption_count > 0;
+      const isSelected = selectedGridId === grid.id;
+      const color = grid.map_color || "#10B981";
+      const feature = grid.feature_snapshot || {};
+      const rain6h = Number(feature.rain_6h || 0).toFixed(1);
 
       const rect = L.rectangle(bounds, {
         color: color,
-        weight: 1,
-        opacity: 0.6,
-        fillOpacity: isDisrupted ? 0.4 : 0.15,
+        weight: isSelected ? 2.5 : 1,
+        opacity: isSelected ? 0.95 : 0.7,
+        fillOpacity: isDisrupted ? 0.42 : isSelected ? 0.28 : 0.18,
         fillColor: color,
       }).addTo(map);
 
       rect.bindPopup(`
         <div style="font-family: Inter, sans-serif; font-size: 12px; line-height: 1.5;">
-          <strong>${grid.id}</strong><br/>
-          Composite Risk: ${(grid.composite_risk * 100).toFixed(0)}%<br/>
-          Flood Risk: ${(grid.flood_risk * 100).toFixed(0)}%<br/>
-          ${isDisrupted ? '<span style="color: #EF4444; font-weight: bold;">⚡ ACTIVE DISRUPTION</span>' : ''}
+          <strong>${grid.city} · ${grid.id}</strong><br/>
+          State: ${grid.state_label}<br/>
+          Live Risk: ${grid.risk_percent}%<br/>
+          Rain 6h: ${rain6h} mm<br/>
+          AQI: ${feature.aqi ?? "n/a"}<br/>
+          Heat Index: ${feature.heat_index ?? "n/a"}°C<br/>
+          Insured Workers: ${grid.insured_worker_count}<br/>
+          ${isDisrupted ? '<span style="color: #EF4444; font-weight: bold;">⚡ ACTIVE DISRUPTION</span>' : ""}
         </div>
       `);
+      rect.on("click", () => onSelectGrid?.(grid.id));
 
       // Pulsing effect for disrupted grids
       if (isDisrupted) {
@@ -110,6 +115,7 @@ export default function DisruptionMap({ grids, disruptions }: Props) {
           fillOpacity: 0,
           className: "pulse-overlay",
         }).addTo(map);
+        pulseRect.on("click", () => onSelectGrid?.(grid.id));
 
         // Simple pulsing via interval
         let visible = true;
@@ -123,7 +129,11 @@ export default function DisruptionMap({ grids, disruptions }: Props) {
       }
     });
 
-  }, [grids, disruptions]);
+    if (grids.length > 0) {
+      const selected = grids.find((grid) => grid.id === selectedGridId) || grids[0];
+      map.setView([selected.center_lat, selected.center_lng], selectedGridId ? 13 : 11);
+    }
+  }, [grids, selectedGridId, onSelectGrid]);
 
   return <div ref={mapRef} className="w-full h-full" />;
 }

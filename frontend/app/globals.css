@@ -81,11 +81,14 @@ body {
     @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold;
   }
   .status-approved { @apply bg-emerald-500/20 text-emerald-400; }
+  .status-auto_approved { @apply bg-emerald-500/20 text-emerald-400; }
   .status-paid { @apply bg-emerald-500/20 text-emerald-400; }
   .status-processing { @apply bg-amber-500/20 text-amber-400; }
   .status-soft_flagged { @apply bg-yellow-500/20 text-yellow-400; }
   .status-hard_flagged { @apply bg-red-500/20 text-red-400; }
   .status-approved_after_review { @apply bg-blue-500/20 text-blue-400; }
+  .status-manual_submitted { @apply bg-cyan-500/20 text-cyan-400; }
+  .status-manual_under_review { @apply bg-cyan-500/20 text-cyan-400; }
   .status-rejected { @apply bg-red-500/20 text-red-400; }
   .status-cancelled { @apply bg-slate-500/20 text-slate-300; }
 

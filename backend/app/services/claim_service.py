@@ -3,6 +3,7 @@ from typing import Any
 import uuid
 
 from fastapi import HTTPException
+from postgrest.exceptions import APIError
 
 from app.database import get_supabase
 from app.ml import earning_simulator, fraud_engine
@@ -14,6 +15,19 @@ REVIEWABLE_STATUSES = {
     "hard_flagged",
     "manual_submitted",
     "manual_under_review",
+}
+
+OPTIONAL_CLAIM_COLUMNS = {
+    "claim_origin",
+    "eligible_payout_amount",
+    "held_payout_amount",
+    "review_reason",
+    "reviewed_by",
+    "reviewed_at",
+    "resolution_note",
+    "batch_id",
+    "is_batch_paused",
+    "ring_review_flag",
 }
 
 
@@ -42,16 +56,20 @@ def record_claim_event(
     metadata: dict | None = None,
 ) -> None:
     db = get_supabase()
-    db.table("claim_events").insert(
-        {
-            "claim_id": claim_id,
-            "event_type": event_type,
-            "actor_type": actor_type,
-            "actor_id": actor_id,
-            "note": note,
-            "metadata": metadata or {},
-        }
-    ).execute()
+    try:
+        db.table("claim_events").insert(
+            {
+                "claim_id": claim_id,
+                "event_type": event_type,
+                "actor_type": actor_type,
+                "actor_id": actor_id,
+                "note": note,
+                "metadata": metadata or {},
+            }
+        ).execute()
+    except APIError as exc:
+        if "claim_events" not in str(exc):
+            raise
 
 
 def _get_policy_for_disruption(worker_id: str, disruption_started_at: str | None) -> dict | None:
@@ -165,31 +183,86 @@ def _canonical_claim(claim: dict) -> dict:
     }
 
 
+def _enrich_claim_row(claim: dict) -> dict:
+    db = get_supabase()
+    claim_id = claim["id"]
+    payouts = (
+        db.table("payouts")
+        .select("*")
+        .eq("claim_id", claim_id)
+        .order("created_at", desc=True)
+        .execute()
+    ).data or []
+    claim_events = []
+    try:
+        claim_events = (
+            db.table("claim_events")
+            .select("*")
+            .eq("claim_id", claim_id)
+            .order("created_at", desc=False)
+            .execute()
+        ).data or []
+    except Exception:
+        claim_events = []
+
+    disruption = None
+    if claim.get("disruption_id"):
+        disruption_res = (
+            db.table("disruption_events")
+            .select("*")
+            .eq("id", claim["disruption_id"])
+            .limit(1)
+            .execute()
+        )
+        disruption = disruption_res.data[0] if disruption_res.data else None
+
+    worker = None
+    if claim.get("worker_id"):
+        worker_res = (
+            db.table("workers")
+            .select("name, platform, grid_id, iss_score")
+            .eq("id", claim["worker_id"])
+            .limit(1)
+            .execute()
+        )
+        worker = worker_res.data[0] if worker_res.data else None
+
+    return _canonical_claim(
+        {
+            **claim,
+            "payouts": payouts,
+            "claim_events": claim_events,
+            "disruption_events": disruption,
+            "workers": worker,
+        }
+    )
+
+
 def get_claims_for_worker(worker_id: str, limit: int = 10) -> list[dict]:
     db = get_supabase()
     result = (
         db.table("claims")
-        .select("*, disruption_events(*), payouts(*), claim_events(*), workers(name, platform, grid_id)")
+        .select("*")
         .eq("worker_id", worker_id)
         .order("created_at", desc=True)
         .limit(limit)
         .execute()
     )
-    return [_canonical_claim(row) for row in (result.data or [])]
+    return [_enrich_claim_row(row) for row in (result.data or [])]
 
 
 def get_claim_detail(claim_id: str) -> dict:
     db = get_supabase()
     result = (
         db.table("claims")
-        .select("*, disruption_events(*), payouts(*), claim_events(*), workers(name, platform, grid_id, iss_score)")
+        .select("*")
         .eq("id", claim_id)
         .single()
         .execute()
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Claim not found")
-    return _canonical_claim(result.data)
+    return _enrich_claim_row(result.data)
 
 
 def get_worker_fallback_eligibility(worker_id: str) -> dict:
@@ -361,7 +434,15 @@ def create_claim_for_disruption(
         "is_batch_paused": False,
         "ring_review_flag": len(all_flags) >= 3,
     }
-    claim_res = db.table("claims").insert(claim_data).execute()
+    try:
+        claim_res = db.table("claims").insert(claim_data).execute()
+    except APIError as exc:
+        message = str(exc)
+        fallback_data = {k: v for k, v in claim_data.items() if k not in OPTIONAL_CLAIM_COLUMNS}
+        if any(column in message for column in OPTIONAL_CLAIM_COLUMNS):
+            claim_res = db.table("claims").insert(fallback_data).execute()
+        else:
+            raise
     claim = claim_res.data[0] if claim_res.data else None
     if not claim:
         return None
@@ -527,16 +608,23 @@ def approve_claim_review(
 
     approved_total = _compute_review_approved_payout(claim)
     review_meta = _review_metadata(reason, note)
-    db.table("claims").update(
-        {
-            "status": "approved_after_review",
-            "payout_amount": approved_total,
-            "reviewed_by": reviewer,
-            "reviewed_at": review_meta["reviewed_at"],
-            "review_reason": review_meta["review_reason"],
-            "resolution_note": review_meta["resolution_note"],
-        }
-    ).eq("id", claim_id).execute()
+    update_payload = {
+        "status": "approved_after_review",
+        "payout_amount": approved_total,
+        "reviewed_by": reviewer,
+        "reviewed_at": review_meta["reviewed_at"],
+        "review_reason": review_meta["review_reason"],
+        "resolution_note": review_meta["resolution_note"],
+    }
+    try:
+        db.table("claims").update(update_payload).eq("id", claim_id).execute()
+    except APIError as exc:
+        message = str(exc)
+        fallback_payload = {k: v for k, v in update_payload.items() if k not in OPTIONAL_CLAIM_COLUMNS}
+        if any(column in message for column in OPTIONAL_CLAIM_COLUMNS):
+            db.table("claims").update(fallback_payload).eq("id", claim_id).execute()
+        else:
+            raise
 
     payouts = claim.get("audit_trail", {}).get("payouts", [])
     held_payout = next((p for p in payouts if p.get("status") == "held_for_review"), None)
@@ -618,17 +706,24 @@ def reject_claim_review(
         raise HTTPException(status_code=400, detail="Claim is not reviewable.")
 
     review_meta = _review_metadata(reason, note)
-    db.table("claims").update(
-        {
-            "status": "rejected",
-            "payout_amount": 0,
-            "held_payout_amount": 0,
-            "reviewed_by": reviewer,
-            "reviewed_at": review_meta["reviewed_at"],
-            "review_reason": review_meta["review_reason"],
-            "resolution_note": review_meta["resolution_note"],
-        }
-    ).eq("id", claim_id).execute()
+    update_payload = {
+        "status": "rejected",
+        "payout_amount": 0,
+        "held_payout_amount": 0,
+        "reviewed_by": reviewer,
+        "reviewed_at": review_meta["reviewed_at"],
+        "review_reason": review_meta["review_reason"],
+        "resolution_note": review_meta["resolution_note"],
+    }
+    try:
+        db.table("claims").update(update_payload).eq("id", claim_id).execute()
+    except APIError as exc:
+        message = str(exc)
+        fallback_payload = {k: v for k, v in update_payload.items() if k not in OPTIONAL_CLAIM_COLUMNS}
+        if any(column in message for column in OPTIONAL_CLAIM_COLUMNS):
+            db.table("claims").update(fallback_payload).eq("id", claim_id).execute()
+        else:
+            raise
     db.table("payouts").update({"status": "cancelled"}).eq("claim_id", claim_id).eq(
         "status", "held_for_review"
     ).execute()

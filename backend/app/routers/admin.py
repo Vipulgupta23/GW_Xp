@@ -100,7 +100,7 @@ async def get_claims_queue(
     db = get_supabase()
     query = (
         db.table("claims")
-        .select("*, workers(name, platform, grid_id, iss_score), disruption_events(trigger_type, severity, weather_description), payouts(*), claim_events(*)")
+        .select("id")
         .order("created_at", desc=True)
         .limit(limit)
     )
@@ -236,7 +236,13 @@ async def simulate_trigger(req: SimulateTriggerRequest):
         "rain_6h": req.severity if "rain" in req.trigger_type else 0,
     }
 
-    await create_disruption_and_claims(grid, trigger, req.severity, raw_weather)
+    summary = await create_disruption_and_claims(
+        grid,
+        trigger,
+        req.severity,
+        raw_weather,
+        trigger_origin="admin_manual",
+    )
 
     demo_note = None
     if trigger.get("manual_only"):
@@ -246,5 +252,15 @@ async def simulate_trigger(req: SimulateTriggerRequest):
         "message": f"🔴 Trigger {req.trigger_type} fired for grid {req.grid_id}",
         "severity": req.severity,
         "grid": grid["id"],
+        "disruption_id": (summary or {}).get("disruption", {}).get("id"),
+        "trigger_origin": (summary or {}).get("trigger_origin", "admin_manual"),
+        "duplicate": (summary or {}).get("duplicate", False),
+        "affected_worker_count": (summary or {}).get("affected_worker_count", 0),
+        "claims_created": (summary or {}).get("claims_created", 0),
+        "auto_paid_claims": (summary or {}).get("auto_paid_claims", 0),
+        "flagged_claims": (summary or {}).get("flagged_claims", 0),
+        "manual_review_claims": (summary or {}).get("manual_review_claims", 0),
+        "paid_payouts": (summary or {}).get("paid_payouts", 0),
+        "held_payouts": (summary or {}).get("held_payouts", 0),
         "demo_note": demo_note,
     }
