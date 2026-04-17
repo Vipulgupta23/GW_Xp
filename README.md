@@ -867,7 +867,9 @@ PWA gives us 90% of mobile app benefits in 20% of the time. Post-hackathon, we c
 4. Swaroop Gupta
 5. Vipul Gupta
 
-### Demo Video: [Watch Demo Video](https://youtu.be/XatuUtuO25w)
+### Demo Video phase 1: [Watch Demo Video](https://youtu.be/XatuUtuO25w)
+### Demo Video phase 2: [Watch Demo Video](https://youtu.be/7Sg47_p3Fns)
+### Demo Video phase 3 (Final): [Watch Demo Video](https://youtu.be/1V1HSrmEIKI)
 ---
 
 ## 📄 License
